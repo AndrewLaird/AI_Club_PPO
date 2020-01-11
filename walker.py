@@ -6,29 +6,54 @@ from torch import nn
 from torch import dist
 from torch import optim
 from torch.distributions import Normal
+import matplotlib.pyplot as plt
 
-def run_game(env,model=False,render=False,max_frames=10000):
-    obs = env.reset()
+def run_game(env,model=False,render=False,max_frames=100):
+    state = env.reset()
     frames = 0
+    entropy = 0
     done = False
+
+    states    = []
+    actions   = []
+    rewards   = []
+    log_probs = []
+    values    = []
+    masks     = []
 
     experience = []
     while(not done and frames < max_frames):
-        if(model):
-            action = model.predict(obs)
-        else:
-            action = env.action_space.sample()
 
-        new_obs,reward,done,info = env.step(action)
+        state = torch.FloatTensor(state)#.to(device)
+
+        dist, value = model(state)
+        action = dist.sample()[0]
+
+        new_state,reward,done,info = env.step(action)
 
         if(render):
             env.render()
 
         frames += 1
 
-        experience.append([obs,action,new_obs,reward])
 
-        obs = new_obs
+        log_prob = dist.log_prob(action)
+        entropy += dist.entropy().mean()
+
+
+        states.append(state)
+        actions.append(action)
+        rewards.append(reward)
+        log_probs.append(log_prob)
+        values.append(value)
+        masks.append((1 - int(done)))#.to(device))
+
+
+        state = new_state
+    print("broken? 1st")
+    print(log_probs)
+
+    return states,actions,rewards,log_probs,values,masks
 
 
 
@@ -67,6 +92,8 @@ class ActorCritic(nn.Module):
     
 
 def compute_gae(next_value, rewards, masks, values, gamma=0.99, tau=0.95):
+    
+    print(len(rewards),len(masks),len(values))
     values = values + [next_value]
     gae = 0
     returns = []
@@ -112,6 +139,13 @@ def ppo_update(model, optimizer, ppo_epochs, mini_batch_size, states, actions, l
             optimizer.step()
     return model
 
+def plot(frame_idx, rewards):
+    #clear_output(True)
+    plt.figure(figsize=(20,5))
+    plt.subplot(131)
+    plt.title('frame %s. reward: %s' % (frame_idx, rewards[-1]))
+    plt.plot(rewards)
+    plt.show()
 
 def test_env(env,model,vis=False):
     state = env.reset()
@@ -119,7 +153,7 @@ def test_env(env,model,vis=False):
     done = False
     total_reward = 0
     while not done:
-        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        state = torch.FloatTensor(state).unsqueeze(0)
         dist, _ = model(state)
         next_state, reward, done, _ = env.step(dist.sample().cpu().numpy()[0])
         state = next_state
@@ -138,7 +172,7 @@ def run_trainer(env,model,optimizer):
     #Hyper params:
     hidden_size      = 256
     lr               = 3e-4
-    num_steps        = 20
+    num_steps        = 10
     mini_batch_size  = 5
     ppo_epochs       = 4
     threshold_reward = 190
@@ -147,7 +181,6 @@ def run_trainer(env,model,optimizer):
     early_stop = False
 
     while frame_idx < max_frames and not early_stop:
-        print('restarting')
 
         log_probs = []
         values    = []
@@ -159,53 +192,45 @@ def run_trainer(env,model,optimizer):
         obs = env.reset()
 
         for _ in range(num_steps):
-            state = torch.FloatTensor(state)#.to(device)
-            dist, value = model(state)
+            game_states,game_actions,game_log_probs,game_rewards,game_values,game_masks = run_game(env,model=model)
+            print("broken?")
+            print(game_log_probs)
+            print("this should be executed right after")
+            frame_idx += len(game_states)
 
-            action = dist.sample()[0]
-            print(action)
-            next_state, reward, done, _ = env.step(action)
-            if(done):
-                continue
 
-            log_prob = dist.log_prob(action)
-            entropy += dist.entropy().mean()
-
-            #rewards.append(torch.FloatTensor(reward).unsqueeze(1))#.to(device))
-            masks.append((1 - int(done)))#.to(device))
-
-            states.append(state)
-            actions.append(action)
-            log_probs.append(log_prob)
-            rewards.append(reward)
+            states.extend(game_states)
+            actions.extend(game_actions)
+            log_probs.extend(game_log_probs)
+            rewards.extend(game_rewards)
             # will turn into advantage
-            values.append(value)
-
-            state = next_state
-            frame_idx += 1
-
-            if frame_idx % 1000 == 0:
-                test_reward = np.mean([test_env(env,model) for _ in range(10)])
-                test_rewards.append(test_reward)
-                plot(frame_idx, test_rewards)
-                if test_reward > threshold_reward: early_stop = True
-                test_env(env,model,vis=True)
+            values.extend(game_values)
+            masks.extend(game_masks)
 
 
-        next_state = torch.FloatTensor(next_state)#.to(device)
+        next_state = torch.FloatTensor(states[-1])#.to(device)
         _, next_value = model(next_state)
-        print(masks)
         returns = compute_gae(next_value, rewards, masks, values)
 
         states    = torch.stack(states,axis=0)
         actions   = torch.stack(actions)
         returns   = torch.cat(returns).view(-1)
+        print([x  for x in log_probs if type(x) != type(torch.Tensor())])
         log_probs = torch.cat(log_probs)
         values    = torch.cat(values)
-        print(returns.shape,values.shape)
         advantage = returns - values
 
         model = ppo_update(model, optimizer, ppo_epochs, mini_batch_size, states, actions, log_probs, returns, advantage)
+
+        test_reward = np.mean([test_env(env,model) for _ in range(10)])
+        test_rewards.append(test_reward)
+        #plot(frame_idx, test_rewards)
+        run_game(env,model=model,render=True)
+        if test_reward > threshold_reward: early_stop = True
+        #test_env(env,model,vis=True)
+
+        print("updating the model")
+        print("---------")
         
 
 if (__name__ == "__main__"):
@@ -216,7 +241,6 @@ if (__name__ == "__main__"):
 
     hidden_size = 1024
     lr = 1e-3
-    print(num_outputs)
 
 
     model = ActorCritic(num_inputs, num_outputs, hidden_size)#.to(device)
@@ -227,7 +251,6 @@ if (__name__ == "__main__"):
 
 
     # play 5 games to get started
-    run_game(env,render=True)
 
 
     
