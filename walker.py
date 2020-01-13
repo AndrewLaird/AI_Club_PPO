@@ -1,14 +1,14 @@
 import gym
-import numpy as np
-import collections
-import torch
+import numpy as np 
+import collections 
+import torch 
 from torch import nn
 from torch import dist
 from torch import optim
 from torch.distributions import Normal
 import matplotlib.pyplot as plt
 
-def run_game(env,model=False,render=False,max_frames=100):
+def run_game(env,model=False,render=False,max_frames=100000):
     state = env.reset()
     frames = 0
     entropy = 0
@@ -50,8 +50,6 @@ def run_game(env,model=False,render=False,max_frames=100):
 
 
         state = new_state
-    print("broken? 1st")
-    print(log_probs)
 
     return states,actions,rewards,log_probs,values,masks
 
@@ -64,7 +62,7 @@ def init_weights(m):
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, num_inputs, num_outputs, hidden_size, std=0.0):
+    def __init__(self, num_inputs, num_outputs, hidden_size, std=1.0):
         # Pytorch Setup of a module
         super(ActorCritic, self).__init__()
 
@@ -92,8 +90,8 @@ class ActorCritic(nn.Module):
     
 
 def compute_gae(next_value, rewards, masks, values, gamma=0.99, tau=0.95):
+    # From: https://towardsdatascience.com/proximal-policy-optimization-tutorial-part-2-2-gae-and-ppo-loss-fe1b3c5549e8
     
-    print(len(rewards),len(masks),len(values))
     values = values + [next_value]
     gae = 0
     returns = []
@@ -105,20 +103,21 @@ def compute_gae(next_value, rewards, masks, values, gamma=0.99, tau=0.95):
 
 def ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantage):
     batch_size = states.size(0)
+    # mini_batch_size=batch_size just means we shuffle the data
+    mini_batch_size = batch_size
     for _ in range(batch_size // mini_batch_size):
         rand_ids = np.random.randint(0, batch_size, mini_batch_size)
-        for rand_id in rand_ids:
-            output_states = states[rand_id]
-            output_actions = actions[rand_id]
-            output_log_probs = log_probs[rand_id]
-            output_returns = returns[rand_id]
-            output_advantage = advantage[rand_id]
-            yield output_states, output_actions, output_log_probs, output_returns, output_advantage
+        output_states = states[rand_ids]
+        output_actions = actions[rand_ids]
+        output_log_probs = log_probs[rand_ids]
+        output_returns = returns[rand_ids]
+        output_advantage = advantage[rand_ids]
+        yield output_states, output_actions, output_log_probs, output_returns, output_advantage
 
 
 
 def ppo_update(model, optimizer, ppo_epochs, mini_batch_size, states, actions, log_probs, returns, advantages, clip_param=0.2):
-    for _ in range(ppo_epochs):
+    for epoch in range(ppo_epochs):
         for state, action, old_log_probs, return_, advantage in ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantages):
             dist, value = model(state)
             entropy = dist.entropy().mean()
@@ -134,9 +133,29 @@ def ppo_update(model, optimizer, ppo_epochs, mini_batch_size, states, actions, l
             loss = 0.5 * critic_loss + actor_loss - 0.001 * entropy
 
             optimizer.zero_grad()
-            # Suspect retain_graph
-            loss.backward(retain_graph=True)
+            loss.backward()
             optimizer.step()
+            """
+            dist, value = model(state)
+            entropy = dist.entropy().mean()
+            new_log_probs = dist.log_prob(action)
+
+            ratio = (new_log_probs - old_log_probs).exp()
+            surr1 = ratio * advantage
+            surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
+
+            actor_loss  = - torch.min(surr1, surr2).mean()
+            critic_loss = (return_ - value).pow(2).mean()
+
+            loss = 0.5 * critic_loss + actor_loss - 0.001 * entropy
+
+            optimizer.zero_grad()
+            print("Loss:",loss)
+            # Suspect retain_graph
+            loss.backward()
+            optimizer.step()
+            """
+    print("done training")
     return model
 
 def plot(frame_idx, rewards):
@@ -170,17 +189,17 @@ def run_trainer(env,model,optimizer):
     # number of steps per game
     num_steps = 100
     #Hyper params:
-    hidden_size      = 256
-    lr               = 3e-4
-    num_steps        = 10
-    mini_batch_size  = 5
-    ppo_epochs       = 4
+    num_steps        = 100
+    mini_batch_size  = 200
+    ppo_epochs       = 100
     threshold_reward = 190
 
     state = env.reset()
     early_stop = False
+    counter = 0
 
-    while frame_idx < max_frames and not early_stop:
+    while not early_stop:
+        counter += 1
 
         log_probs = []
         values    = []
@@ -188,17 +207,24 @@ def run_trainer(env,model,optimizer):
         actions   = []
         rewards   = []
         masks     = []
+        returns   = []
         entropy = 0
         obs = env.reset()
 
-        for _ in range(num_steps):
-            game_states,game_actions,game_log_probs,game_rewards,game_values,game_masks = run_game(env,model=model)
-            print("broken?")
-            print(game_log_probs)
-            print("this should be executed right after")
+        for step in range(num_steps):
+            print("game:",step+1)
+            game_states,game_actions,game_rewards,game_log_probs,game_values,game_masks = run_game(env,model=model)
             frame_idx += len(game_states)
 
+            # Compute the returns
+            # used for advantage
+            next_state = torch.FloatTensor(game_states[-1])#.to(device)
+            _, next_value = model(next_state)
+            next_value = next_value.detach()
+            game_returns = compute_gae(next_value, game_rewards, game_masks, game_values)
 
+
+            # update all our information updated
             states.extend(game_states)
             actions.extend(game_actions)
             log_probs.extend(game_log_probs)
@@ -206,44 +232,52 @@ def run_trainer(env,model,optimizer):
             # will turn into advantage
             values.extend(game_values)
             masks.extend(game_masks)
+            returns.extend(game_returns)
 
 
-        next_state = torch.FloatTensor(states[-1])#.to(device)
-        _, next_value = model(next_state)
-        returns = compute_gae(next_value, rewards, masks, values)
 
-        states    = torch.stack(states,axis=0)
-        actions   = torch.stack(actions)
-        returns   = torch.cat(returns).view(-1)
-        print([x  for x in log_probs if type(x) != type(torch.Tensor())])
-        log_probs = torch.cat(log_probs)
-        values    = torch.cat(values)
-        advantage = returns - values
 
-        model = ppo_update(model, optimizer, ppo_epochs, mini_batch_size, states, actions, log_probs, returns, advantage)
+        states_tensor    = torch.stack(states,axis=0)
+        actions_tensor   = torch.stack(actions)
+        returns_tensor   = torch.cat(returns).view(-1).detach()
+        log_probs_tensor = torch.cat(log_probs).detach()
+        values_tensor    = torch.cat(values).detach()
+        advantage_tensor = returns_tensor - values_tensor
 
-        test_reward = np.mean([test_env(env,model) for _ in range(10)])
+        print("ppo update")
+        
+
+        model = ppo_update(model, optimizer, ppo_epochs, mini_batch_size, states_tensor, actions_tensor, log_probs_tensor, returns_tensor, advantage_tensor)
+
+        test_reward = np.mean([test_env(env,model) for _ in range(5)])
+        print("reward",test_reward)
         test_rewards.append(test_reward)
         #plot(frame_idx, test_rewards)
-        run_game(env,model=model,render=True)
+        run_game(env,model=model,render=counter%1==1)
         if test_reward > threshold_reward: early_stop = True
         #test_env(env,model,vis=True)
 
         print("updating the model")
         print("---------")
+        # save the model
+        torch.save(model,"best_model.torch")
         
 
 if (__name__ == "__main__"):
-    env = gym.make("BipedalWalker-v2")
+    #env = gym.make("MountainCarContinuous-v0")
+    #env = gym.make("BipedalWalker-v2")
+    #env = gym.make("LunarLanderContinuous-v2")
+    env = gym.make("Pendulum-v0")
+
 
     num_inputs  = env.observation_space.shape[0]
     num_outputs = env.action_space.shape[0]
 
-    hidden_size = 1024
-    lr = 1e-3
+    hidden_size = 512
+    lr =1e-3#3e-4
 
 
-    model = ActorCritic(num_inputs, num_outputs, hidden_size)#.to(device)
+    model = ActorCritic(num_inputs, num_outputs, hidden_size,std=0.0)#.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     run_trainer(env,model,optimizer)
