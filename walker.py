@@ -14,19 +14,30 @@ def run_game(env,model=False,render=False,max_frames=100000):
     entropy = 0
     done = False
 
+    # the states given to our model
     states    = []
+    # actions we took in the environemtn
     actions   = []
+    # rewards from the environment 
     rewards   = []
+    # the log probability of taking the action we took
+    # from the distribtuion our model predicted
     log_probs = []
+    # what our ai predicted the return at this position should be
     values    = []
+    # 1 if game is going otherwise 0
     masks     = []
 
-    experience = []
+    
     while(not done and frames < max_frames):
 
         state = torch.FloatTensor(state)#.to(device)
 
         dist, value = model(state)
+        # Dist is a Normal distirbution 
+        # our model predicted the Mean and handed us something
+        # we could take samples from
+        # This is a form of exploration
         action = dist.sample()[0]
 
         new_state,reward,done,info = env.step(action)
@@ -91,7 +102,6 @@ class ActorCritic(nn.Module):
 
 def compute_gae(next_value, rewards, masks, values, gamma=0.99, tau=0.95):
     # From: https://towardsdatascience.com/proximal-policy-optimization-tutorial-part-2-2-gae-and-ppo-loss-fe1b3c5549e8
-    
     values = values + [next_value]
     gae = 0
     returns = []
@@ -99,12 +109,13 @@ def compute_gae(next_value, rewards, masks, values, gamma=0.99, tau=0.95):
         delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]
         gae = delta + gamma * tau * masks[step] * gae
         returns.insert(0, gae + values[step])
+
     return returns
 
 def ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantage):
     batch_size = states.size(0)
     # mini_batch_size=batch_size just means we shuffle the data
-    mini_batch_size = batch_size
+    # mini_batch_size = batch_size//4
     for _ in range(batch_size // mini_batch_size):
         rand_ids = np.random.randint(0, batch_size, mini_batch_size)
         output_states = states[rand_ids]
@@ -135,27 +146,6 @@ def ppo_update(model, optimizer, ppo_epochs, mini_batch_size, states, actions, l
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            """
-            dist, value = model(state)
-            entropy = dist.entropy().mean()
-            new_log_probs = dist.log_prob(action)
-
-            ratio = (new_log_probs - old_log_probs).exp()
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
-
-            actor_loss  = - torch.min(surr1, surr2).mean()
-            critic_loss = (return_ - value).pow(2).mean()
-
-            loss = 0.5 * critic_loss + actor_loss - 0.001 * entropy
-
-            optimizer.zero_grad()
-            print("Loss:",loss)
-            # Suspect retain_graph
-            loss.backward()
-            optimizer.step()
-            """
-    print("done training")
     return model
 
 def plot(frame_idx, rewards):
@@ -164,7 +154,7 @@ def plot(frame_idx, rewards):
     plt.subplot(131)
     plt.title('frame %s. reward: %s' % (frame_idx, rewards[-1]))
     plt.plot(rewards)
-    plt.show()
+    plt.show(block=False)
 
 def test_env(env,model,vis=False):
     state = env.reset()
@@ -186,12 +176,10 @@ def run_trainer(env,model,optimizer):
     max_frames = 1000000
     frame_idx  = 0
     test_rewards = []
-    # number of steps per game
-    num_steps = 100
     #Hyper params:
-    num_steps        = 100
-    mini_batch_size  = 200
-    ppo_epochs       = 100
+    num_games        = 20
+    mini_batch_size  = 5
+    ppo_epochs       = 4
     threshold_reward = 190
 
     state = env.reset()
@@ -210,9 +198,10 @@ def run_trainer(env,model,optimizer):
         returns   = []
         entropy = 0
         obs = env.reset()
+        print(obs)
 
-        for step in range(num_steps):
-            print("game:",step+1)
+        for game in range(num_games):
+            print("\rgame:",game+1,end='\r')
             game_states,game_actions,game_rewards,game_log_probs,game_values,game_masks = run_game(env,model=model)
             frame_idx += len(game_states)
 
@@ -237,8 +226,8 @@ def run_trainer(env,model,optimizer):
 
 
 
-        states_tensor    = torch.stack(states,axis=0)
-        actions_tensor   = torch.stack(actions)
+        states_tensor    = torch.stack(states,axis=0).detach()
+        actions_tensor   = torch.stack(actions).detach()
         returns_tensor   = torch.cat(returns).view(-1).detach()
         log_probs_tensor = torch.cat(log_probs).detach()
         values_tensor    = torch.cat(values).detach()
@@ -253,7 +242,7 @@ def run_trainer(env,model,optimizer):
         print("reward",test_reward)
         test_rewards.append(test_reward)
         #plot(frame_idx, test_rewards)
-        run_game(env,model=model,render=counter%1==1)
+        run_game(env,model=model,render=1)
         if test_reward > threshold_reward: early_stop = True
         #test_env(env,model,vis=True)
 
@@ -266,18 +255,19 @@ def run_trainer(env,model,optimizer):
 if (__name__ == "__main__"):
     #env = gym.make("MountainCarContinuous-v0")
     #env = gym.make("BipedalWalker-v2")
-    #env = gym.make("LunarLanderContinuous-v2")
     env = gym.make("Pendulum-v0")
 
 
     num_inputs  = env.observation_space.shape[0]
+    print("num_inputs",num_inputs)
     num_outputs = env.action_space.shape[0]
+    print("num_outputs",num_outputs)
 
-    hidden_size = 512
+    hidden_size = 256
     lr =1e-3#3e-4
 
 
-    model = ActorCritic(num_inputs, num_outputs, hidden_size,std=0.0)#.to(device)
+    model = ActorCritic(num_inputs, num_outputs, hidden_size,std=0.1)#.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     run_trainer(env,model,optimizer)
