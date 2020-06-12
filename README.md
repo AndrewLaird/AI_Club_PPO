@@ -5,5 +5,4 @@ To make a tutorial I applied PPO to the bipedalWalker environment in Open AI's g
 
 - Video link to presentation: https://www.youtube.com/watch?v=YjAKEGXYf_s&t=4s
 
-gif of the final product:
 ![bipedal2](BipedalWalker2.gif)
